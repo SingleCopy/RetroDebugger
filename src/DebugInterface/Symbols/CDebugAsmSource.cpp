@@ -16,6 +16,7 @@
 #include "CDebugInterfaceC64.h"
 #include "CDebugSymbols.h"
 #include "CDebugSymbolsSegment.h"
+#include "CDebugSymbolsDataWatch.h"
 
 // TODO: the code below is still just a POC written in hurry, meaning this might leak memory a lot and needs proper refactoring
 //       hopefully the labels are not loaded very often... be warned!
@@ -63,6 +64,42 @@ CDebugAsmSource::~CDebugAsmSource()
 //	<   &lt;
 //	>   &gt;
 //	&   &amp;
+
+// Split a line on ',' preserving empty fields (unlike CSlrString::Split / SplitWithChars,
+// which collapse empty fields and so make positional column parsing unreliable).
+static std::vector<std::string> SplitCsvKeepEmpty(const std::string &line)
+{
+	std::vector<std::string> fields;
+	std::string cur;
+	for (size_t i = 0; i < line.size(); i++)
+	{
+		char c = line[i];
+		if (c == ',')
+		{
+			fields.push_back(cur);
+			cur.clear();
+		}
+		else
+		{
+			cur += c;
+		}
+	}
+	fields.push_back(cur);
+	return fields;
+}
+
+// Trim leading/trailing ASCII whitespace (keeps interior spaces, e.g. "Data Watch Name").
+static std::string TrimAsciiWhitespace(const std::string &s)
+{
+	const char *ws = " \t\r\n";
+	size_t a = s.find_first_not_of(ws);
+	if (a == std::string::npos) 
+	{
+		return std::string();
+	}
+	size_t b = s.find_last_not_of(ws);
+	return s.substr(a, b - a + 1);
+}
 
 void CDebugAsmSource::ParseXML(CByteBuffer *byteBuffer, CDebugInterface *debugInterface)
 {
@@ -382,65 +419,110 @@ void CDebugAsmSource::ParseXML(CByteBuffer *byteBuffer, CDebugInterface *debugIn
 		std::vector<CSlrString *> *lines = strWatches->SplitWithChars(splitCharsLine);
 		
 		LOGD("lines=");
-		for (std::vector<CSlrString *>::iterator it = lines->begin(); it != lines->end(); it++)
+		for (std::vector<CSlrString*>::iterator it = lines->begin(); it != lines->end(); it++)
 		{
-			CSlrString *oneLine = *it;
+			CSlrString* oneLine = *it;
 			if (oneLine->GetLength() < 2)
 				continue;
-			
+
 			oneLine->RemoveFromBeginningSelectedCharacter(' ');
 			oneLine->RemoveFromBeginningSelectedCharacter('\t');
-			
+
 			oneLine->DebugPrint("> ");
-			//				oneLine->DebugPrintVector("oneLine");
-			
-			std::vector<CSlrString *> *words = oneLine->Split(splitCharsComma);
-			
-			if (words->size() == 0)
-				continue;
-			
-			if (words->size() < 2)
+
+			// Watchpoint row format: SEGMENT,ADDRESS1,ADDRESS2,ARGUMENT
+			//   ADDRESS1 = start address (hex)
+			//   ADDRESS2 = optional end address (hex); when present the watch spans the range
+			//   ARGUMENT = optional watch name, optionally followed by ",FORMAT" where FORMAT is
+			//              one of the StrToRepresentation tokens (hex8/hex16le/udec8/sdec16le/bin/...).
+			//              The exporter (KickAss/Mads) emits a fixed 4-column row, so the format is
+			//              carried inside the user-controlled argument text rather than a new column.
+			// Empty fields must be preserved positionally, so split manually (see SplitCsvKeepEmpty).
+			std::string lineStr = oneLine->GetStdStringUTF8();
+			std::vector<std::string> fields = SplitCsvKeepEmpty(lineStr);
+
+			std::string segmentStr = fields.size() > 0 ? TrimAsciiWhitespace(fields[0]) : std::string();
+			std::string address1Str = fields.size() > 1 ? TrimAsciiWhitespace(fields[1]) : std::string();
+			std::string address2Str = fields.size() > 2 ? TrimAsciiWhitespace(fields[2]) : std::string();
+
+			// Argument region = everything after ADDRESS2 (fields[3] onward). It may itself be
+			// comma-split as "name,format". Drop trailing empty fields (from a trailing comma);
+			// if the last remaining token is a recognized format keyword, peel it off as the
+			// representation, otherwise the whole region (commas included) is the name.
+			std::vector<std::string> argTokens;
+			for (size_t i = 3; i < fields.size(); i++)
 			{
-				LOGError("Wrong format for watches (%d words)", words->size()); // at line #%d", tag.line);
-				CSlrString::DeleteVector(words);
+				argTokens.push_back(fields[i]);
+			}
+
+			while (!argTokens.empty() && TrimAsciiWhitespace(argTokens.back()).empty())
+			{
+				argTokens.pop_back();
+			}
+
+			int representation = WATCH_REPRESENTATION_HEX_8;
+			if (argTokens.size() >= 2)
+			{
+				int rep = CDebugSymbolsDataWatch::StrToRepresentation(TrimAsciiWhitespace(argTokens.back()).c_str());
+				if (rep != -1)
+				{
+					representation = rep;
+					argTokens.pop_back();
+				}
+			}
+
+			std::string argumentStr;
+			for (size_t i = 0; i < argTokens.size(); i++)
+			{
+				if (i > 0)
+					argumentStr += ",";
+				argumentStr += argTokens[i];
+			}
+			argumentStr = TrimAsciiWhitespace(argumentStr);
+
+			if (segmentStr.empty() || address1Str.empty())
+			{
+				LOGError("Wrong format for watches (need SEGMENT,ADDRESS1,...): %s", lineStr.c_str());
 				continue;
 			}
-			
-			CSlrString *segmentName = (*words)[0];
-			CSlrString *strAddr = (*words)[1];
-			int address = strAddr->ToIntFromHex();
-			
+
+			CSlrString *segmentName = new CSlrString(segmentStr);
+
+			CSlrString strAddr1(address1Str);
+			int address = strAddr1.ToIntFromHex();
+
 			int numberOfValues = 1;
-			CSlrString *strRepresentation = NULL;
-			
-			if (words->size() > 2)
+			if (!address2Str.empty())
 			{
-				CSlrString *strNumberOfValues = (*words)[2];
-				numberOfValues = strNumberOfValues->ToInt();
+				CSlrString strAddr2(address2Str);
+				int address2 = strAddr2.ToIntFromHex();
+				numberOfValues = address2 - address + 1;
 				if (numberOfValues < 1)
 				{
 					numberOfValues = 1;
 				}
 			}
-			
-			if (words->size() > 3)
-			{
-				strRepresentation = (*words)[3];
-			}
-			
+
 			CDebugSymbolsSegment *segment = symbols->FindSegment(segmentName);
 			if (segment == NULL)
 			{
 				segmentName->DebugPrint("segment=");
 				LOGError("ParseWatches: segment not found");
-				CSlrString::DeleteVector(words);
+				delete segmentName;
 				continue;
 			}
-			
-			segment->AddWatch(address, numberOfValues, strRepresentation);
 
-			LOGD("CSlrString::DeleteVector(words): 6 words=%x", words);
-			CSlrString::DeleteVector(words);
+			if (!argumentStr.empty())
+			{
+				segment->AddWatch(address, (char *)argumentStr.c_str(), (uint8)representation, numberOfValues);
+			}
+			else
+			{
+				// no name supplied: let AddWatch derive one from the code label (or hex address)
+				segment->AddWatch(address, numberOfValues, NULL);
+			}
+
+			delete segmentName;
 		}
 	}
 

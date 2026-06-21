@@ -56,7 +56,12 @@ void CDebugSymbolsDataWatch::Serialize(Hjson::Value hjsonWatch)
 	char hexStr[9];
 	sprintf(hexStr, "%04x", address);
 	hjsonWatch["Address"] = hexStr;
-	
+
+	if (watchName != NULL && watchName[0] != 0)
+	{
+		hjsonWatch["Name"] = watchName;
+	}
+
 	hjsonWatch["Format"] = RepresentationToStr(representation);
 }
 
@@ -90,7 +95,19 @@ void CDebugSymbolsDataWatch::Deserialize(Hjson::Value hjsonWatch)
 		hexValueStr = static_cast<const char *>(hjsonWatch["Address"]);
 		address = strtoul( hexValueStr, NULL, 16 );
 	}
-	
+
+	// user-entered watch name takes precedence over any name derived from a code label
+	Hjson::Value hjsonName = hjsonWatch["Name"];
+	if (hjsonName.type() != Hjson::Type::Undefined)
+	{
+		const char *nameStr = hjsonWatch["Name"];
+		if (watchName)
+		{
+			STRFREE(watchName);
+		}
+		watchName = STRALLOC(nameStr);
+	}
+
 	const char *representationStr = hjsonWatch["Format"];
 	representation = StrToRepresentation(representationStr);
 }

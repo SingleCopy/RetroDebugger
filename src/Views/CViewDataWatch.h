@@ -45,11 +45,20 @@ public:
 protected:
 	int addWatchPopupAddr;
 	char addWatchPopupSymbol[256];
+	char addWatchPopupName[MAX_LABEL_TEXT_BUFFER_SIZE];
+	bool addWatchPopupFocusNameRequested;
 	int imGuiColumnsWidthWorkaroundFrame;
 	int imGuiOpenPopupFrame;
 	ImGui::ComboFilterState comboFilterState = {0, false};
 	char comboFilterTextBuf[MAX_LABEL_TEXT_BUFFER_SIZE];
 
+	// edit watch popup state
+	bool openEditWatchPopupRequested;
+	int editWatchPopupOriginalAddr;
+	int editWatchPopupAddr;
+	char editWatchPopupAddrText[MAX_LABEL_TEXT_BUFFER_SIZE];
+	char editWatchPopupName[MAX_LABEL_TEXT_BUFFER_SIZE];
+	int imGuiOpenEditPopupFrame;
 };
 
 #endif

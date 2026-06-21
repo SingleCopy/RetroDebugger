@@ -23,6 +23,7 @@
 #include "CDebugSymbolsDataWatch.h"
 #include "CDebugSymbolsCodeLabel.h"
 #include "CGuiMain.h"
+#include "imgui_internal.h"
 
 #include <math.h>
 
@@ -90,7 +91,21 @@ CViewDataWatch::CViewDataWatch(const char *name, float posX, float posY, float p
 	this->symbols = symbols;
 	this->debugInterface = symbols->debugInterface;
 	this->dataAdapter = symbols->dataAdapter;
-	this->viewMemoryMap = viewMemoryMap;	
+	this->viewMemoryMap = viewMemoryMap;
+
+	this->addWatchPopupAddr = 0;
+	this->addWatchPopupSymbol[0] = 0;
+	this->addWatchPopupName[0] = 0;
+	this->addWatchPopupFocusNameRequested = false;
+	this->imGuiColumnsWidthWorkaroundFrame = 0;
+	this->imGuiOpenPopupFrame = 0;
+
+	this->openEditWatchPopupRequested = false;
+	this->editWatchPopupOriginalAddr = 0;
+	this->editWatchPopupAddr = 0;
+	this->editWatchPopupAddrText[0] = 0;
+	this->editWatchPopupName[0] = 0;
+	this->imGuiOpenEditPopupFrame = 0;
 }
 
 void CViewDataWatch::DoLogic()
@@ -116,11 +131,14 @@ void CViewDataWatch::RenderImGui()
 	sprintf(buf, "##DataWatchTable_%s", dataAdapter->adapterID);
 
 	CDebugSymbolsDataWatch *watchToDelete = NULL;
+	CDebugSymbolsDataWatch *watchToEdit = NULL;
 
-	// address | label | value | format | delete
 	if (ImGui::BeginTable(buf, 5, ImGuiTableFlags_Resizable | ImGuiTableFlags_Reorderable | ImGuiTableFlags_Hideable | ImGuiTableFlags_Sortable | ImGuiTableFlags_Borders))
 	{
-		const float trashColWidth = ImGui::GetFrameHeight() + ImGui::GetStyle().CellPadding.x * 2.0f;
+		const float editBtnWidth = ImGui::CalcTextSize("Edit").x + ImGui::GetStyle().FramePadding.x * 2.0f;
+		const float trashBtnWidth = ImGui::GetFrameHeight();
+		const float trashColWidth = editBtnWidth + ImGui::GetStyle().ItemSpacing.x + trashBtnWidth
+								  + ImGui::GetStyle().CellPadding.x * 2.0f;
 		ImGui::TableSetupColumn("Address", ImGuiTableColumnFlags_WidthFixed,   ImGui::CalcTextSize("FFFFFF").x);
 		ImGui::TableSetupColumn("Label",   ImGuiTableColumnFlags_WidthStretch, 1.0f);
 		ImGui::TableSetupColumn("Value",   ImGuiTableColumnFlags_WidthStretch, 1.0f);
@@ -138,14 +156,21 @@ void CViewDataWatch::RenderImGui()
 			ImGui::Text(buf);
 
 			ImGui::TableNextColumn();
-			CDebugSymbolsCodeLabel *codeLabel = symbolsSegment->FindLabel(watch->address);
-			if (codeLabel)
+			if (watch->watchName != NULL && watch->watchName[0] != 0)
 			{
-				ImGui::Text(codeLabel->GetLabelText());
+				ImGui::TextUnformatted(watch->watchName);
 			}
 			else
 			{
-				ImGui::Text("");
+				CDebugSymbolsCodeLabel *codeLabel = symbolsSegment->FindLabel(watch->address);
+				if (codeLabel)
+				{
+					ImGui::TextUnformatted(codeLabel->GetLabelText());
+				}
+				else
+				{
+					ImGui::TextUnformatted("");
+				}
 			}
 
 			ImGui::TableNextColumn();
@@ -293,6 +318,12 @@ void CViewDataWatch::RenderImGui()
 			ImGui::Combo(buf, &(watch->representation), "Hex 8-bits\0Hex 16-bits LE\0Hex 16-bits BE\0Hex 32-bits LE\0Hex 32-bits BE\0Unsigned Dec 8-bits\0Unsigned Dec 16-bits LE\0Unsigned Dec 16-bits BE\0Unsigned Dec 32-bits LE\0Unsigned Dec 32-bits BE\0Signed Dec 8-bits\0Signed Dec 16-bits LE\0Signed Dec 16-bits BE\0Signed Dec 32-bits LE\0Signed Dec 32-bits BE\0Binary\0\0"); //Text\0\0");
 
 			ImGui::TableNextColumn();
+			sprintf(buf, "Edit##edit%x", watch);
+			if (ImGui::Button(buf))
+			{
+				watchToEdit = watch;
+			}
+			ImGui::SameLine();
 			sprintf(buf, "##del%x", watch);
 			if (TrashIconButton(buf))
 			{
@@ -308,26 +339,50 @@ void CViewDataWatch::RenderImGui()
 		symbols->currentSegment->DeleteWatch(watchToDelete->address);
 	}
 
+	if (watchToEdit)
+	{
+		editWatchPopupOriginalAddr = watchToEdit->address;
+		editWatchPopupAddr = watchToEdit->address;
+		sprintf(editWatchPopupAddrText, "%04X", watchToEdit->address);
+		if (watchToEdit->watchName != NULL)
+		{
+			strncpy(editWatchPopupName, watchToEdit->watchName, sizeof(editWatchPopupName) - 1);
+			editWatchPopupName[sizeof(editWatchPopupName) - 1] = 0;
+		}
+		else
+		{
+			editWatchPopupName[0] = 0;
+		}
+		openEditWatchPopupRequested = true;
+		imGuiOpenEditPopupFrame = 0;
+	}
+
+	if (openEditWatchPopupRequested)
+	{
+		ImGui::OpenPopup("editWatchPopup");
+		openEditWatchPopupRequested = false;
+	}
+
+	bool skipClosePopupByEnterPressInThisFrame = false;
+
 	if (ImGui::Button("+") || (ImGui::IsWindowFocused() && ImGui::IsKeyPressed(ImGuiKey_Enter)))
 	{
 		ImGui::OpenPopup("addWatchPopup");
 
 		addWatchPopupAddr = 0;
 		addWatchPopupSymbol[0] = '\0';
+		addWatchPopupName[0] = '\0';
+		addWatchPopupFocusNameRequested = false;
 		comboFilterTextBuf[0] = 0;
 
 		imGuiOpenPopupFrame = 0;
 	}
-	
+
+	ImGui::SetNextWindowSizeConstraints(ImVec2(360, 0), ImVec2(FLT_MAX, FLT_MAX));
 	if (ImGui::BeginPopup("addWatchPopup"))
 	{
 		ImGui::Text("Add watch point");
 		ImGui::Separator();
-
-		sprintf(buf, "##addWatchPopupAddress%x", this);
-
-		const char **hints = symbols->currentSegment ? symbols->currentSegment->codeLabelsArray : NULL;
-		int numHints = symbols->currentSegment ? symbols->currentSegment->numCodeLabelsInArray : 0;
 
 		if (imGuiOpenPopupFrame < 2)
 		{
@@ -335,120 +390,95 @@ void CViewDataWatch::RenderImGui()
 			imGuiOpenPopupFrame++;
 		}
 
-		ImGui::SetNextItemWidth(220.0f);
-		bool inputActivated = ImGui::InputText(buf, comboFilterTextBuf, IM_ARRAYSIZE(comboFilterTextBuf),
-											   ImGuiInputTextFlags_EnterReturnsTrue);
-
-		ImGui::SameLine();
-		bool buttonAddClicked = ImGui::Button("Add");
-
-		// build filtered list of matching label indices
-		const bool filterIsHex = (comboFilterTextBuf[0] != 0) && FUN_IsHexNumber(comboFilterTextBuf);
-		char needleLower[MAX_LABEL_TEXT_BUFFER_SIZE];
-		int nlen = 0;
-		for (int i = 0; comboFilterTextBuf[i] != 0 && i < (int)sizeof(needleLower) - 1; i++)
+		bool buttonAddClicked = false;
+		if (symbols->currentSegment)
 		{
-			char c = comboFilterTextBuf[i];
-			needleLower[nlen++] = (c >= 'A' && c <= 'Z') ? (c + 32) : c;
-		}
-		needleLower[nlen] = 0;
+			const char **hints = symbols->currentSegment->codeLabelsArray;
+			int numHints = symbols->currentSegment->numCodeLabelsInArray;
 
-		const int kMaxMatches = 512;
-		int matchIdx[kMaxMatches];
-		int matchCount = 0;
-		if (hints != NULL && numHints > 0 && !filterIsHex)
-		{
-			for (int n = 0; n < numHints && matchCount < kMaxMatches; n++)
+			sprintf(buf, "##addWatchPopupForm%x", this);
+			if (ImGui::BeginTable(buf, 2, ImGuiTableFlags_SizingFixedFit | ImGuiTableFlags_NoSavedSettings))
 			{
-				const char *hay = hints[n];
-				if (hay == NULL) continue;
+				ImGui::TableSetupColumn("##label", ImGuiTableColumnFlags_WidthFixed);
+				ImGui::TableSetupColumn("##field", ImGuiTableColumnFlags_WidthStretch);
 
-				bool match = true;
-				if (nlen > 0)
+				ImGui::TableNextRow();
+				ImGui::TableNextColumn();
+				ImGui::AlignTextToFramePadding();
+				ImGui::Text("Address:");
+				ImGui::TableNextColumn();
+				ImGui::SetNextItemWidth(-FLT_MIN);
+				sprintf(buf, "##addWatchPopupAddress%x", this);
+
+				// https://github.com/ocornut/imgui/issues/1658   | IM_ARRAYSIZE(hints)
+				if( ComboFilter(buf, comboFilterTextBuf, IM_ARRAYSIZE(comboFilterTextBuf), hints, numHints, comboFilterState, this) )
 				{
-					match = false;
-					for (const char *p = hay; *p && !match; p++)
+					LOGD("SELECTED %d comboTextBuf='%s'", comboFilterState.activeIdx, comboFilterTextBuf);
+					// Enter (or selecting an entry) in the address combo advances focus to the Name field
+					// instead of submitting the watch, so the user can type a label first.
+					skipClosePopupByEnterPressInThisFrame = true;
+					addWatchPopupFocusNameRequested = true;
+
+					// if that is not address then replace by selected symbol
+					if (FUN_IsHexNumber(comboFilterTextBuf))
 					{
-						const char *h = p;
-						const char *q = needleLower;
-						while (*h && *q)
-						{
-							char hc = *h;
-							if (hc >= 'A' && hc <= 'Z') hc += 32;
-							if (hc != *q) break;
-							h++; q++;
-						}
-						if (*q == 0) match = true;
+						FUN_ToUpperCaseStr(comboFilterTextBuf);
+						addWatchPopupAddr = FUN_HexStrToValue(comboFilterTextBuf);
+					}
+					else if (hints != NULL && numHints > 0)
+					{
+						strcpy(comboFilterTextBuf, hints[comboFilterState.activeIdx]);
 					}
 				}
-				if (match) matchIdx[matchCount++] = n;
-			}
-		}
 
-		// clamp active index to current match range
-		if (comboFilterState.activeIdx >= matchCount) comboFilterState.activeIdx = matchCount > 0 ? matchCount - 1 : 0;
-		if (comboFilterState.activeIdx < 0) comboFilterState.activeIdx = 0;
-
-		// arrow-key navigation (single-line InputText doesn't consume up/down)
-		bool arrowScrolled = false;
-		if (matchCount > 0)
-		{
-			if (ImGui::IsKeyPressed(ImGuiKey_DownArrow))
-			{
-				if (comboFilterState.activeIdx < matchCount - 1) comboFilterState.activeIdx++;
-				arrowScrolled = true;
-			}
-			if (ImGui::IsKeyPressed(ImGuiKey_UpArrow))
-			{
-				if (comboFilterState.activeIdx > 0) comboFilterState.activeIdx--;
-				arrowScrolled = true;
-			}
-		}
-
-		// render list (always visible when hints exist, even when no filter typed)
-		if (hints != NULL && numHints > 0)
-		{
-			ImGui::BeginChild("##watchHints", ImVec2(280.0f, 160.0f), true);
-			for (int i = 0; i < matchCount; i++)
-			{
-				int n = matchIdx[i];
-				const char *hay = hints[n];
-				const bool is_selected = (i == comboFilterState.activeIdx);
-				ImGui::PushID(n);
-				if (ImGui::Selectable(hay, is_selected))
+				// Tab anywhere in the popup advances focus from the address combo to the Name field.
+				// Also close the combo's dropdown popup so it doesn't linger over the Name field.
+				if (ImGui::IsKeyPressed(ImGuiKey_Tab, false))
 				{
-					strcpy(comboFilterTextBuf, hay);
-					comboFilterState.activeIdx = i;
-					inputActivated = true;
+					addWatchPopupFocusNameRequested = true;
+					skipClosePopupByEnterPressInThisFrame = true;
+					ImGui::ClosePopupsOverWindow(ImGui::GetCurrentWindow(), false);
 				}
-				if (is_selected && arrowScrolled)
+
+				ImGui::TableNextRow();
+				ImGui::TableNextColumn();
+				ImGui::AlignTextToFramePadding();
+				ImGui::Text("Name:");
+				ImGui::TableNextColumn();
+				if (addWatchPopupFocusNameRequested)
 				{
-					ImGui::SetScrollHereY();
+					ImGui::SetKeyboardFocusHere();
+					addWatchPopupFocusNameRequested = false;
 				}
-				ImGui::PopID();
+				ImGui::SetNextItemWidth(-FLT_MIN);
+				sprintf(buf, "##addWatchPopupName%x", this);
+				if (ImGui::InputText(buf, addWatchPopupName, IM_ARRAYSIZE(addWatchPopupName), ImGuiInputTextFlags_EnterReturnsTrue))
+				{
+					buttonAddClicked = true;
+				}
+
+				ImGui::EndTable();
 			}
-			ImGui::EndChild();
+
+			if (ImGui::Button("Add"))
+			{
+				buttonAddClicked = true;
+			}
 		}
 
-		// if Enter pressed in the input and a highlighted match exists, use it
-		if (inputActivated && matchCount > 0 && !filterIsHex
-			&& comboFilterState.activeIdx >= 0 && comboFilterState.activeIdx < matchCount)
-		{
-			strcpy(comboFilterTextBuf, hints[matchIdx[comboFilterState.activeIdx]]);
-		}
+		bool finalizeAddingBreakpoint = buttonAddClicked
+			|| (!skipClosePopupByEnterPressInThisFrame && ImGui::IsWindowFocused() && ImGui::IsKeyPressed(ImGuiKey_Enter));
 
-		bool finalizeAddingBreakpoint = buttonAddClicked || inputActivated;
-		
 		if (finalizeAddingBreakpoint)
 		{
 			CDebugSymbolsCodeLabel *label = symbols->currentSegment->FindLabelByText(comboFilterTextBuf);
-			
+
 			char *hexNumberBuf = comboFilterTextBuf;
 			if (comboFilterTextBuf[0] == '$' && comboFilterTextBuf[1] != 0)
 			{
 				hexNumberBuf = comboFilterTextBuf + 1;
 			}
-			
+
 			if (label)
 			{
 				addWatchPopupAddr = label->address;
@@ -471,21 +501,112 @@ void CViewDataWatch::RenderImGui()
 			{
 				addWatchPopupAddr = URANGE(0, addWatchPopupAddr, dataAdapter->AdapterGetDataLength());
 
-				symbols->currentSegment->AddWatch(addWatchPopupAddr, "");
-				
-//				CBreakpointAddr *breakpoint = new CBreakpointAddr(addBreakpointPopupAddr);
-//				AddBreakpoint(breakpoint);
-//				UpdateRenderBreakpoints();
+				symbols->currentSegment->AddWatch(addWatchPopupAddr, addWatchPopupName);
 
 				ImGui::CloseCurrentPopup();
 			}
 		}
-						
+
 		////
-		
+
 		ImGui::EndPopup();
 	}
-	
+
+	ImGui::SetNextWindowSizeConstraints(ImVec2(360, 0), ImVec2(FLT_MAX, FLT_MAX));
+	if (ImGui::BeginPopup("editWatchPopup"))
+	{
+		ImGui::Text("Edit watch point");
+		ImGui::Separator();
+
+		if (imGuiOpenEditPopupFrame < 2)
+		{
+			ImGui::SetKeyboardFocusHere();
+			imGuiOpenEditPopupFrame++;
+		}
+
+		sprintf(buf, "##editWatchPopupForm%x", this);
+		if (ImGui::BeginTable(buf, 2, ImGuiTableFlags_SizingFixedFit | ImGuiTableFlags_NoSavedSettings))
+		{
+			ImGui::TableSetupColumn("##label", ImGuiTableColumnFlags_WidthFixed);
+			ImGui::TableSetupColumn("##field", ImGuiTableColumnFlags_WidthStretch);
+
+			ImGui::TableNextRow();
+			ImGui::TableNextColumn();
+			ImGui::AlignTextToFramePadding();
+			ImGui::Text("Address:");
+			ImGui::TableNextColumn();
+			ImGui::SetNextItemWidth(-FLT_MIN);
+			sprintf(buf, "##editWatchPopupAddress%x", this);
+			ImGui::InputText(buf, editWatchPopupAddrText, IM_ARRAYSIZE(editWatchPopupAddrText),
+							 ImGuiInputTextFlags_CharsHexadecimal | ImGuiInputTextFlags_CharsUppercase);
+
+			ImGui::TableNextRow();
+			ImGui::TableNextColumn();
+			ImGui::AlignTextToFramePadding();
+			ImGui::Text("Name:");
+			ImGui::TableNextColumn();
+			ImGui::SetNextItemWidth(-FLT_MIN);
+			sprintf(buf, "##editWatchPopupName%x", this);
+			ImGui::InputText(buf, editWatchPopupName, IM_ARRAYSIZE(editWatchPopupName));
+
+			ImGui::EndTable();
+		}
+
+		bool buttonSaveClicked = ImGui::Button("Save");
+		ImGui::SameLine();
+		bool buttonCancelClicked = ImGui::Button("Cancel");
+
+		if (buttonCancelClicked)
+		{
+			ImGui::CloseCurrentPopup();
+		}
+		else if (buttonSaveClicked)
+		{
+			char *addrText = editWatchPopupAddrText;
+			if (addrText[0] == '$' && addrText[1] != 0)
+				addrText++;
+
+			if (!FUN_IsHexNumber(addrText))
+			{
+				char *msgBuf = SYS_GetCharBuf();
+				sprintf(msgBuf, "Invalid address:\n%s", editWatchPopupAddrText);
+				guiMain->ShowMessageBox("Can't edit watch", msgBuf);
+				SYS_ReleaseCharBuf(msgBuf);
+			}
+			else
+			{
+				int newAddr = FUN_HexStrToValue(addrText);
+				newAddr = URANGE(0, newAddr, dataAdapter->AdapterGetDataLength());
+
+				CDebugSymbolsSegment *seg = symbols->currentSegment;
+				std::map<int, CDebugSymbolsDataWatch *>::iterator itWatch = seg->watches.find(editWatchPopupOriginalAddr);
+				if (itWatch != seg->watches.end())
+				{
+					CDebugSymbolsDataWatch *watch = itWatch->second;
+					if (newAddr != editWatchPopupOriginalAddr)
+					{
+						// delete any watch already present at the new address,
+						// then re-key this watch under the new address
+						std::map<int, CDebugSymbolsDataWatch *>::iterator itExisting = seg->watches.find(newAddr);
+						if (itExisting != seg->watches.end() && itExisting->second != watch)
+						{
+							delete itExisting->second;
+							seg->watches.erase(itExisting);
+						}
+						seg->watches.erase(editWatchPopupOriginalAddr);
+						watch->address = newAddr;
+						seg->watches[newAddr] = watch;
+					}
+					watch->SetName(editWatchPopupName);
+				}
+
+				ImGui::CloseCurrentPopup();
+			}
+		}
+
+		ImGui::EndPopup();
+	}
+
 	symbols->UnlockMutex();
 	
 	SYS_ReleaseCharBuf(buf);
